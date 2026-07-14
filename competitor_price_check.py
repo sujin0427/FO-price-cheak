@@ -19,7 +19,7 @@ except ImportError as e:
     print("필요 패키지 설치:  pip install requests beautifulsoup4 lxml openpyxl cloudscraper playwright")
     print("에러:", e); sys.exit(1)
 
-VERSION = "v9.68"
+VERSION = "v9.70"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRODUCTS_CSV = os.path.join(HERE, "products.csv")
 OUT_DIR = HERE
@@ -441,8 +441,14 @@ def is_blocked(html):
     low = html[:5000].lower()
     return any(m in low for m in BLOCK_MARKERS)
 
+_DASH_RE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]")
+
+def _fix_dash(s):
+    """en-dash(–)·em-dash(—)·minus(−) 등 모든 대시 변형을 일반 하이픈(-)으로 통일."""
+    return _DASH_RE.sub("-", s) if s else s
+
 def normalize(name):
-    s = name.lower().replace("＋", "+").replace("–", "-")
+    s = _fix_dash(name.lower().replace("＋", "+"))
     s = re.sub(r"(\d),(\d)", r"\1\2", s)
     s = re.sub(r"\b(with )?lidocaine\b", "", s)
     s = re.sub(r"\b(inj|injection)\b", "", s)
@@ -1137,6 +1143,7 @@ def _split_elasty_options(prods):
                 seen.add(nn)
                 out.append({"name": nm, "cost": p.get("cost", ""), "price": price, "norm": nn})
         else:
+            p = dict(p, name=_fix_dash(p.get("name") or ""))
             out.append(p)
             if p.get("norm"):
                 seen.add(p["norm"])
@@ -1261,6 +1268,24 @@ def _suspicious_keys(comp_prices):
     if median <= 0:
         return set()
     return {k for k, v in vals if v < median * 0.4 or v > median * 3.0}
+
+def _we_sell_match(bname, our_prods):
+    """베스트셀러(경쟁사) 제품명이 우리 판매목록에 있는지 매칭. 있으면 우리 제품 dict, 없으면 None.
+    가격비교와 동일 기준(용량·리도카인·실린지수량 구분)."""
+    bn = normalize(bname or "")
+    if not bn:
+        return None
+    bsig = unit_sig(bn)
+    best, bestp = 0.0, None
+    for op in our_prods:
+        on = op.get("norm") or ""
+        if not on or not units_ok(bsig, unit_sig(on)) or not plus_ok(bn, on) \
+           or not pack_ok(bn, on) or not _distinctive_ok(bn, on):
+            continue
+        sc = match_score(bn, on)
+        if sc > best:
+            best, bestp = sc, op
+    return bestp if best >= MATCH_THRESHOLD else None
 
 def write_excel(rows, newly, today, bestsellers=None):
     wb = openpyxl.Workbook()
@@ -1432,7 +1457,8 @@ def write_excel(rows, newly, today, bestsellers=None):
         wsb.append([note])
         wsb.cell(1, 1).font = Font(bold=True, color="C00000")
         wsb.append([])
-        wsb.append(["사이트명", "등수", "제품명", "판매가격"])
+        wsb.append(["사이트명", "등수", "제품명", "판매가격", "우리판매", "매칭된 우리제품"])
+        _our_prods = [r["p"] for r in rows]
         _hr = wsb.max_row
         for c in wsb[_hr]:
             c.font = Font(bold=True, color="FFFFFF"); c.fill = fill
@@ -1445,7 +1471,10 @@ def write_excel(rows, newly, today, bestsellers=None):
                 continue
             _start = wsb.max_row + 1
             for i, (nm_b, pr_b) in enumerate(lst):
-                wsb.append([k, i + 1, nm_b, pr_b])
+                _mp = _we_sell_match(nm_b, _our_prods)
+                wsb.append([k, i + 1, nm_b, pr_b, ("O 판매중" if _mp else "X 미판매"), (_mp["name"] if _mp else "-")])
+                if not _mp:
+                    wsb.cell(wsb.max_row, 5).font = Font(bold=True, color="C00000")
             _end = wsb.max_row
             wsb.merge_cells(start_row=_start, start_column=1, end_row=_end, end_column=1)
             _sc = wsb.cell(_start, 1)
@@ -1459,6 +1488,8 @@ def write_excel(rows, newly, today, bestsellers=None):
         wsb.column_dimensions["B"].width = 6
         wsb.column_dimensions["C"].width = 42
         wsb.column_dimensions["D"].width = 12
+        wsb.column_dimensions["E"].width = 11
+        wsb.column_dimensions["F"].width = 34
         wsb.freeze_panes = "A" + str(_hr + 1)
 
     # 모든 시트 셀에 얇은 회색 테두리(구분 잘 되게)
