@@ -19,7 +19,7 @@ except ImportError as e:
     print("필요 패키지 설치:  pip install requests beautifulsoup4 lxml openpyxl cloudscraper playwright")
     print("에러:", e); sys.exit(1)
 
-VERSION = "v9.70"
+VERSION = "v9.72"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRODUCTS_CSV = os.path.join(HERE, "products.csv")
 OUT_DIR = HERE
@@ -479,6 +479,13 @@ _GENERIC = {
     "care","line","the","and","for","box","pcs","vial","vials","syringe","syringes","booster",
 }
 
+def _is_brand_token(t):
+    """흔한 수식어가 아니고 4글자 이상인 '브랜드성' 단어인지(단일 공통단어 강매칭 판정용).
+    숫자로 시작하는 토큰(100u·50iu·10ml 등 용량/단위)은 브랜드가 아니므로 제외."""
+    core = re.sub(r"[^a-z0-9]", "", t)
+    return (len(core) >= 4 and core not in _GENERIC
+            and not core.isdigit() and not core[:1].isdigit())
+
 def _distinctive_ok(a, b):
     """우리 제품의 '브랜드성 토큰'(흔한 수식어 제외)이 상대 이름에 하나도 없으면 매칭 금지.
     예: 'belotero volume' 의 브랜드 토큰은 'belotero' → 상대에 belotero 없으면(‘metoo volume’ 등) 매칭 안 함.
@@ -486,8 +493,8 @@ def _distinctive_ok(a, b):
     ta = set()
     for t in a.split():
         core = re.sub(r"[^a-z0-9]", "", t)
-        if len(core) >= 3 and core not in _GENERIC and not core.isdigit():
-            ta.add(core)
+        if len(core) >= 3 and core not in _GENERIC and not core.isdigit() and not core[:1].isdigit():
+            ta.add(core)   # 숫자로 시작하는 용량토큰(100u 등)은 브랜드 아님 → 제외
     if not ta:
         return True
     bc = re.sub(r"[^a-z0-9]", "", b)
@@ -528,10 +535,18 @@ def match_score(a, b):
     ta = {t for t in a.split() if len(t) > 1}
     tb = {t for t in b.split() if len(t) > 1}
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    # 브랜드 표기 차이 흡수: 공백 제거 후 짧은 쪽이 긴 쪽의 앞부분과 일치하면 강매칭
+    # (예: 'lipo lab ppc' vs 'lipolab ppc solution' → 'lipolabppc' 가 'lipolabppcsolution' 의 접두)
+    ca = re.sub(r"[^a-z0-9]", "", a); cb = re.sub(r"[^a-z0-9]", "", b)
+    if ca and cb:
+        _short, _long = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+        if len(_short) >= 6 and _long.startswith(_short):
+            return max(ratio, 0.9)
     if ta and tb:
         inter = ta & tb
         smaller = min(len(ta), len(tb))
-        if len(inter) == smaller and len(inter) >= 2 and abs(len(ta) - len(tb)) <= 1:
+        if len(inter) == smaller and abs(len(ta) - len(tb)) <= 1 \
+           and (len(inter) >= 2 or (len(inter) == 1 and _is_brand_token(next(iter(inter))))):
             return max(ratio, 0.9)
     return ratio
 
